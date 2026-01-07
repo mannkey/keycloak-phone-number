@@ -28,15 +28,15 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/SendSmsRequest'
+              $ref: "#/components/schemas/SendSmsRequest"
       responses:
-        '200':
+        "200":
           description: Successful operation
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SendSmsResponse'
-        '401':
+                $ref: "#/components/schemas/SendSmsResponse"
+        "401":
           description: Unauthorized
 components:
   securitySchemes:
@@ -58,6 +58,8 @@ components:
         DRNotifyHttpMethod:
           type: string
         Tool:
+          type: string
+        TemplateId:
           type: string
       required:
         - Text

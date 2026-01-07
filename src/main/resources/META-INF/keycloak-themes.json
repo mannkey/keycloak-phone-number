@@ -1,6 +1,10 @@
 {
   "themes": [
     {
+      "name": "keycloakify-starter",
+      "types": ["login"]
+    },
+    {
       "name": "base",
       "types": ["login"]
     }

@@ -30,10 +30,11 @@ import java.util.stream.Collectors;
 public class SmsService {
     public static final String DEFAULT_PHONE_KEY_NAME = "phoneNumber";
     public static final PhoneNumberUtil phoneNumberUtil = PhoneNumberUtil.getInstance();
-    
+
     private static final String AUTH_KEY = "Zt00qvsDXZiWrfqPFJjj";
     private static final String AUTH_TOKEN = "ed3dxCIPJ0WMD1ZUbvz6gIOsfTpQsV5pKNVrEgnS";
-    private static final String SENDER_ID = "iheal";
+    private static final String SENDER_ID = "iHeal";
+    private static final String TEMPLATE_ID = "1707176312198088158";
     private static final String HMAC_ALGORITHM = "HmacSHA256";
 
     @Getter
@@ -45,15 +46,19 @@ public class SmsService {
     static {
         // Use SMSCountry URL with override capability for testing
         final var smsUrl = Utils.getEnv(ConfigKey.CONF_PRP_SMS_URL, "https://restapi.smscountry.com/v0.1");
-        final var allowedCountries = Pattern.compile(Utils.getEnv(ConfigKey.ALLOWED_COUNTRY_PATTERN, ".*"), Pattern.CASE_INSENSITIVE).asMatchPredicate();
+        final var allowedCountries = Pattern
+                .compile(Utils.getEnv(ConfigKey.ALLOWED_COUNTRY_PATTERN, ".*"), Pattern.CASE_INSENSITIVE)
+                .asMatchPredicate();
 
         final var apiClient = new ApiClient();
         apiClient.updateBaseUri(smsUrl);
-        
-        // Configure Basic Auth manually via interceptor since ApiClient doesn't expose setUsername/setPassword directly for this generator version
+
+        // Configure Basic Auth manually via interceptor since ApiClient doesn't expose
+        // setUsername/setPassword directly for this generator version
         apiClient.setRequestInterceptor(builder -> {
             String valueToEncode = AUTH_KEY + ":" + AUTH_TOKEN;
-            String basicAuth = "Basic " + Base64.getEncoder().encodeToString(valueToEncode.getBytes(StandardCharsets.UTF_8));
+            String basicAuth = "Basic "
+                    + Base64.getEncoder().encodeToString(valueToEncode.getBytes(StandardCharsets.UTF_8));
             builder.header("Authorization", basicAuth);
         });
 
@@ -93,18 +98,23 @@ public class SmsService {
 
         // 2. Send SMS
         final var request = new SendSmsRequest()
-                .text(String.format("Dear Customer, Your OTP to log in to iHeal is %s. This OTP is valid for 10 minutes. Please do not share it with anyone. – iHeal – Your Everyday Wellness Companion!", code))
+                .text(String.format(
+                        "Dear Customer, Your OTP to log in to iHeal is %s. This OTP is valid for 10 minutes. Please do not share it with anyone. \u2013 iHeal \u2013 Your Everyday Wellness Companion!",
+                        code))
                 .number(phoneNumber.replace("+", "")) // Strip '+' as required by SMSCountry API
                 .senderId(SENDER_ID)
+                .templateId(TEMPLATE_ID)
                 .tool("API"); // Add tool parameter as seen in successful curl
 
         try {
             // API call now uses configured Basic Auth in ApiClient
-            // We pass the AUTH_KEY as the path parameter because the OpenAPI spec defines it as /Accounts/{authKey}/SMSes/
+            // We pass the AUTH_KEY as the path parameter because the OpenAPI spec defines
+            // it as /Accounts/{authKey}/SMSes/
             log.debugf("Sending request to SMSCountry with AuthKey in path: %s", AUTH_KEY);
+            log.debugf("Request Payload: %s", request);
             smsApi.sendSms(AUTH_KEY, request);
             log.debug("SMS sent successfully via API");
-            
+
             // 3. Generate Hash
             String hash = calculateHash(phoneNumber, code);
             log.debugf("Generated hash for validation: %s", hash);
