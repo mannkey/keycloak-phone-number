@@ -1,0 +1,2 @@
+com.vymalo.keycloak.rest.PhoneAuthResourceProviderFactory
+com.vymalo.keycloak.rest.VymaloResourceProviderFactory

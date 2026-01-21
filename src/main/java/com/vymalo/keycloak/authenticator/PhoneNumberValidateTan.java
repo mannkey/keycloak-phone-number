@@ -56,8 +56,28 @@ public class PhoneNumberValidateTan extends AbstractPhoneNumberAuthenticator {
             return;
         }
 
-        final var code = formData.getFirst("code");
-        final var validate$ = smsService.confirmSmsCode(phoneNumber, code, hash);
+        // Accept both 'code' and 'tan' for backward compatibility with mobile apps
+        String code = formData.getFirst("code");
+        if (code == null || code.isEmpty()) {
+            code = formData.getFirst("tan");
+        }
+        
+        // Validate that code is provided
+        if (code == null || code.trim().isEmpty()) {
+            log.warnf("No OTP code provided in form data. Available keys: %s", 
+                     String.join(", ", formData.keySet()));
+            final var event = context.getEvent();
+            event.user(user).error(Errors.INVALID_CODE);
+            Response challenge = context
+                    .form()
+                    .setAttribute("phoneNumber", phoneNumber)
+                    .setError("missing_otp_code")
+                    .createForm("request-user-tan-code.ftl");
+            context.challenge(challenge);
+            return;
+        }
+        
+        final var validate$ = smsService.confirmSmsCode(phoneNumber, code.trim(), hash);
 
         if (validate$.isPresent() && validate$.get()) {
             context.setUser(user);

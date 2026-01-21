@@ -101,18 +101,25 @@ public class PhoneNumberGetNumber extends AbstractPhoneNumberAuthenticator {
         }
 
         phoneNumberWithoutPrefix = StringUtils.trim(phoneNumberWithoutPrefix);
+        regionPrefix = StringUtils.trim(regionPrefix);
 
+        // Remove leading zeros from phone number
         while (phoneNumberWithoutPrefix.startsWith("0")) {
             phoneNumberWithoutPrefix = StringUtils.removeStart(phoneNumberWithoutPrefix, "0");
         }
 
         final var phoneNumber = regionPrefix + phoneNumberWithoutPrefix;
+        
+        log.debugf("Phone auth: regionPrefix='%s', phoneWithoutPrefix='%s', fullNumber='%s'",
+                  regionPrefix, phoneNumberWithoutPrefix, phoneNumber);
 
         final var phoneNumber$ = smsService.format(phoneNumber);
         if (phoneNumber$.isEmpty()) {
             event.clone()
                     .detail("phone_number", phoneNumber)
                     .error("parse number error: Can't parse phone number");
+            log.errorf("Failed to parse phone number: regionPrefix='%s', phone='%s', combined='%s'",
+                      regionPrefix, phoneNumberWithoutPrefix, phoneNumber);
             context.clearUser();
             Response challenge = context
                     .form()

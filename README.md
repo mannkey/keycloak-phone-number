@@ -1,6 +1,6 @@
 # Keycloak Phone Number Login Plugin
 
-This plugin helps you to login by phone number.
+This plugin enables authentication via phone number and SMS OTP, supporting both browser-based and RESTful API flows.
 
 | Keycloak Version | Plugin Version |
 |------------------|----------------|
@@ -29,13 +29,28 @@ authenticate using their phone number. The process includes:
 This modular plugin uses a multi-step flow and is designed with separation of concerns in mind, using a dedicated
 service layer for SMS and phone number processing.
 
+## 🚀 New: RESTful API Support
+
+The plugin now supports **both browser-based and API-based authentication flows**:
+- **Browser Flow**: Traditional web-based login with FreeMarker templates
+- **API Flow**: RESTful endpoints for mobile apps, SPAs, and headless clients
+
+**API Endpoints:**
+- `POST /realms/{realm}/phone-auth/request-otp` - Request OTP
+- `POST /realms/{realm}/phone-auth/verify-otp` - Verify OTP and get tokens
+- `POST /realms/{realm}/phone-auth/resend-otp` - Resend OTP
+
+📖 **[Complete API Documentation](./docs/API_DOCUMENTATION.md)**
+
 ## New Feature: Dual Authentication Support for SMS Service
 
 The `SmsService` has been enhanced to support both **Basic Authentication** and **OAuth2 Client Credentials Grant** for secure communication with the SMS provider. The plugin prioritizes OAuth2 if the required environment variables are set; otherwise, it falls back to Basic Auth.
 
 ## 2. How to Use It
 
-### Downloading the Plugin
+### Installation
+
+#### Downloading the Plugin
 
 You can download the latest plugin JAR from the GitHub artifacts using a `curl` command. For example:
 
@@ -43,10 +58,7 @@ You can download the latest plugin JAR from the GitHub artifacts using a `curl` 
 curl -L -o keycloak-phonenumber-login.jar https://github.com/vymalo/keycloak-phone-number/releases/download/v<version>/keycloak-phonenumber-login-<version>.jar
 ```
 
-### Mounting into Keycloak
-
-Once you have the JAR, mount it into the Keycloak server. For example, when running Keycloak in Docker, you can mount
-the plugin as a volume:
+### Deployment
 
 #### Docker Example
 
@@ -57,15 +69,54 @@ docker run -d \
   -e KEYCLOAK_ADMIN=admin \
   -e KEYCLOAK_ADMIN_PASSWORD=password \
   -e SMS_API_URL=http://your-sms-api-url \
-  -e SMS_API_COUNTRY_PATTERN='cm|de|fr' \
+  -e SMS_API_COUNTRY_PATTERN='cm|de|fr|in' \
   -e SMS_API_AUTH_USERNAME=someuser \
   -e SMS_API_AUTH_PASSWORD=somepassword \
-  -e OAUTH2_CLIENT_ID=some-client-id \
-  -e OAUTH2_CLIENT_SECRET=some-client-secret \
-  -e OAUTH2_TOKEN_ENDPOINT=http://token-mock:8080/token \
   -v /path/to/keycloak-phonenumber-login.jar:/opt/keycloak/providers/keycloak-phonenumber-login.jar \
   quay.io/keycloak/keycloak:26.1.2 start-dev
 ```
+
+### Usage
+
+#### For Browser-based Applications
+
+1. Configure the phone authentication flow in Keycloak Admin Console
+2. Add authenticators to your browser flow:
+   - SMS -1 Get Phone number
+   - SMS -2 Confirm Phone number
+   - SMS -3 Choose user by Phone number
+   - SMS -4 Send SMS Tan
+   - SMS -5 Validate SMS Tan
+
+#### For API/Mobile Applications
+
+Use the RESTful endpoints to implement passwordless phone authentication:
+
+```javascript
+// 1. Request OTP
+const response = await fetch('/realms/my-realm/phone-auth/request-otp', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    phone: '9876543210',
+    regionPrefix: '+91'
+  })
+});
+const { sessionId } = await response.json();
+
+// 2. Verify OTP
+const tokenResponse = await fetch('/realms/my-realm/phone-auth/verify-otp', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    sessionId: sessionId,
+    code: '123456'
+  })
+});
+const { accessToken, refreshToken } = await tokenResponse.json();
+```
+
+See [API Documentation](./docs/API_DOCUMENTATION.md) for complete examples in JavaScript, Python, Swift, and Kotlin.
 
 #### Kubernetes Example
 
@@ -158,31 +209,84 @@ Configure these variables in your deployment (Docker, Kubernetes, etc.) as shown
 
 ## 4. Architecture
 
-The plugin is built using a multi-module Maven structure with the following layers:
+The plugin is built using a scalable, modular architecture:
 
-- **Core Module:**  
-  Contains shared constants, utilities, and models (e.g., phone number helpers, country codes).
+### Core Components
 
-- **Authenticator Module:**  
-  Implements custom Keycloak authenticators that control the multi-step authentication flow:
-    - **PhoneNumberGetNumber:** Collects user phone numbers.
-    - **PhoneNumberConfirmNumber:** Displays the confirmed phone number.
-    - **PhoneNumberChooseUser:** Looks up or creates users based on phone number.
-    - **PhoneNumberSendTan:** Sends a TAN via an SMS service.
-    - **PhoneNumberValidateTan:** Validates the TAN entered by the user.
-    - **PhoneNumberUpdateUser:** Prompts users to update their profile post-authentication.
+- **Service Layer:**
+  - `PhoneAuthenticationService` - Unified business logic for both browser and API flows
+  - `PhoneAuthSessionService` - Distributed session management (cluster-safe)
+  - `SmsService` - SMS sending and phone number validation
 
-- **Service Module:**  
-  Encapsulates business logic for phone number processing and SMS operations:
-    - **PhoneNumberService:** Validates and formats phone numbers.
-    - **SmsService:** Handles interactions with the external SMS API (using an OpenAPI-generated client).
+- **REST API Layer:**
+  - `PhoneAuthResourceProvider` - RESTful endpoints for mobile/API clients
+  - `PhoneAuthResourceProviderFactory` - Keycloak SPI integration
 
-- **OpenAPI Client Module:**  
-  Contains the generated client code for the SMS API integration, ensuring a robust and type-safe communication with the
-  external service.
+- **Browser Authenticator Layer:**
+  - `PhoneNumberGetNumber` - Collects user phone numbers
+  - `PhoneNumberConfirmNumber` - Displays confirmed phone number
+  - `PhoneNumberChooseUser` - Looks up or creates users
+  - `PhoneNumberSendTan` - Sends OTP via SMS
+  - `PhoneNumberValidateTan` - Validates OTP
+  - `PhoneNumberUpdateUser` - Profile updates post-authentication
 
-Dependency injection (via CDI) is used to wire components together, making the system more modular, testable, and
-maintainable.
+### Key Features
+
+- **🔄 Dual-Mode Support**: Browser forms and REST API
+- **📊 Horizontal Scalability**: Distributed session storage
+- **🛡️ Security**: Rate limiting, session locking, IP tracking
+- **🌍 Multi-Tenancy**: Realm-aware session management
+- **⚡ Performance**: Stateless design with caching
+
+### Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Client Applications                      │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │   Browser    │  │  Mobile App  │  │     SPA      │      │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
+└─────────┼──────────────────┼──────────────────┼─────────────┘
+          │                  │                  │
+          │ Form POST        │ REST API         │ REST API
+          │                  │                  │
+┌─────────▼──────────────────▼──────────────────▼─────────────┐
+│                  Keycloak Server                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │            Phone Auth Plugin                          │  │
+│  │  ┌─────────────────┐      ┌────────────────────┐     │  │
+│  │  │   Browser       │      │   REST API         │     │  │
+│  │  │   Authenticators│      │   Provider         │     │  │
+│  │  └────────┬────────┘      └─────────┬──────────┘     │  │
+│  │           │                          │                │  │
+│  │           └──────────┬───────────────┘                │  │
+│  │                      │                                │  │
+│  │           ┌──────────▼──────────┐                     │  │
+│  │           │ PhoneAuthentication │                     │  │
+│  │           │      Service        │                     │  │
+│  │           └──────────┬──────────┘                     │  │
+│  │                      │                                │  │
+│  │         ┌────────────┼────────────┐                   │  │
+│  │         │            │            │                   │  │
+│  │    ┌────▼────┐  ┌───▼────┐  ┌───▼────┐              │  │
+│  │    │ Session │  │  SMS   │  │  User  │              │  │
+│  │    │ Service │  │Service │  │Provider│              │  │
+│  │    └─────────┘  └────────┘  └────────┘              │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌────────────────┐  ┌────────────────┐                    │
+│  │  Infinispan    │  │    User DB     │                    │
+│  │  Cache         │  │                │                    │
+│  └────────────────┘  └────────────────┘                    │
+└──────────────────────────────────────────────────────────────┘
+          │
+          │ HTTP POST
+          │
+┌─────────▼──────────┐
+│   SMS Provider     │
+│  (SMSCountry API)  │
+└────────────────────┘
+```
 
 ---
 
