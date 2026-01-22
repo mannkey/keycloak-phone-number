@@ -12,7 +12,6 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.services.resource.RealmResourceProvider;
 
-import java.io.IOException;
 
 /**
  * REST API Resource Provider for Phone-based Authentication.
@@ -64,14 +63,27 @@ public class PhoneAuthResourceProvider implements RealmResourceProvider {
      */
     @POST
     @Path("/request-otp")
-    @Consumes(MediaType.APPLICATION_JSON)
+    @Consumes({MediaType.APPLICATION_JSON, MediaType.APPLICATION_JSON + ";charset=UTF-8"})
     @Produces(MediaType.APPLICATION_JSON)
     public Response requestOtp(String requestBody, @Context org.keycloak.http.HttpRequest httpRequest) {
         log.debug("Received request-otp call");
 
         try {
-            // Parse request
-            PhoneAuthRequest request = objectMapper.readValue(requestBody, PhoneAuthRequest.class);
+            if (requestBody == null || requestBody.trim().isEmpty()) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(PhoneAuthResponse.error("Request body is required", "EMPTY_BODY"))
+                        .build();
+            }
+            // Parse request - handle both JSON and plain text JSON strings
+            PhoneAuthRequest request;
+            try {
+                request = objectMapper.readValue(requestBody, PhoneAuthRequest.class);
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                log.errorf("Failed to parse JSON: %s", e.getMessage());
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(PhoneAuthResponse.error("Invalid JSON format", "INVALID_JSON"))
+                        .build();
+            }
             
             // Get client IP and User-Agent
             String ipAddress = getClientIpAddress(httpRequest);
@@ -90,11 +102,6 @@ public class PhoneAuthResourceProvider implements RealmResourceProvider {
                 return Response.status(Response.Status.BAD_REQUEST).entity(response).build();
             }
 
-        } catch (IOException e) {
-            log.error("Failed to parse request body", e);
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(PhoneAuthResponse.error("Invalid request format", "INVALID_REQUEST"))
-                    .build();
         } catch (Exception e) {
             log.error("Internal error processing OTP request", e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
@@ -124,14 +131,27 @@ public class PhoneAuthResourceProvider implements RealmResourceProvider {
      */
     @POST
     @Path("/verify-otp")
-    @Consumes(MediaType.APPLICATION_JSON)
+    @Consumes({MediaType.APPLICATION_JSON, MediaType.APPLICATION_JSON + ";charset=UTF-8"})
     @Produces(MediaType.APPLICATION_JSON)
     public Response verifyOtp(String requestBody, @Context org.keycloak.http.HttpRequest httpRequest) {
         log.debug("Received verify-otp call");
 
         try {
-            // Parse request
-            OtpVerifyRequest request = objectMapper.readValue(requestBody, OtpVerifyRequest.class);
+            if (requestBody == null || requestBody.trim().isEmpty()) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(OtpVerifyResponse.error("Request body is required", "EMPTY_BODY", null))
+                        .build();
+            }
+            // Parse request - handle both JSON and plain text JSON strings
+            OtpVerifyRequest request;
+            try {
+                request = objectMapper.readValue(requestBody, OtpVerifyRequest.class);
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                log.errorf("Failed to parse JSON: %s", e.getMessage());
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(OtpVerifyResponse.error("Invalid JSON format", "INVALID_JSON", null))
+                        .build();
+            }
             
             // Get client IP
             String ipAddress = getClientIpAddress(httpRequest);
@@ -157,11 +177,6 @@ public class PhoneAuthResourceProvider implements RealmResourceProvider {
                 return Response.status(statusCode).entity(response).build();
             }
 
-        } catch (IOException e) {
-            log.error("Failed to parse request body", e);
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(OtpVerifyResponse.error("Invalid request format", "INVALID_REQUEST", null))
-                    .build();
         } catch (Exception e) {
             log.error("Internal error processing OTP verification", e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
@@ -189,15 +204,28 @@ public class PhoneAuthResourceProvider implements RealmResourceProvider {
      */
     @POST
     @Path("/resend-otp")
-    @Consumes(MediaType.APPLICATION_JSON)
+    @Consumes({MediaType.APPLICATION_JSON, MediaType.APPLICATION_JSON + ";charset=UTF-8"})
     @Produces(MediaType.APPLICATION_JSON)
-    public Response resendOtp(String requestBody) {
+    public Response resendOtp(String requestBody, @Context org.keycloak.http.HttpRequest httpRequest) {
         log.debug("Received resend-otp call");
 
         try {
+            if (requestBody == null || requestBody.trim().isEmpty()) {
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(PhoneAuthResponse.error("Request body is required", "EMPTY_BODY"))
+                        .build();
+            }
             // Parse request (simple JSON with sessionId)
-            var node = objectMapper.readTree(requestBody);
-            String sessionId = node.get("sessionId").asText();
+            com.fasterxml.jackson.databind.JsonNode node;
+            try {
+                node = objectMapper.readTree(requestBody);
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                log.errorf("Failed to parse JSON: %s", e.getMessage());
+                return Response.status(Response.Status.BAD_REQUEST)
+                        .entity(PhoneAuthResponse.error("Invalid JSON format", "INVALID_JSON"))
+                        .build();
+            }
+            String sessionId = node.get("sessionId") != null ? node.get("sessionId").asText() : null;
 
             if (sessionId == null || sessionId.trim().isEmpty()) {
                 return Response.status(Response.Status.BAD_REQUEST)
@@ -218,11 +246,6 @@ public class PhoneAuthResourceProvider implements RealmResourceProvider {
                 return Response.status(Response.Status.BAD_REQUEST).entity(response).build();
             }
 
-        } catch (IOException e) {
-            log.error("Failed to parse request body", e);
-            return Response.status(Response.Status.BAD_REQUEST)
-                    .entity(PhoneAuthResponse.error("Invalid request format", "INVALID_REQUEST"))
-                    .build();
         } catch (Exception e) {
             log.error("Internal error processing OTP resend", e);
             return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
@@ -288,4 +311,5 @@ public class PhoneAuthResourceProvider implements RealmResourceProvider {
         // In production, configure proper headers from your load balancer
         return "unknown";
     }
+
 }

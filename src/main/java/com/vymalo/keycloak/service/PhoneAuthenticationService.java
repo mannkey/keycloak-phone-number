@@ -116,11 +116,16 @@ public class PhoneAuthenticationService {
                 return handleInvalidSession(validation, authSession);
             }
 
-            // Verify security: check IP address hasn't changed (optional, can be configured)
+            // Verify security: check IP address hasn't changed - block if mismatch
             if (!ipAddress.equals(authSession.getIpAddress())) {
                 log.warnf("IP address mismatch for session: %s. Original: %s, Current: %s",
                          authSession.getSessionId(), authSession.getIpAddress(), ipAddress);
-                // You can decide to block or allow based on security requirements
+                sessionService.recordFailedAttempt(authSession);
+                return OtpVerifyResponse.error(
+                    "IP address mismatch - verification blocked for security",
+                    "IP_MISMATCH",
+                    authSession.getMaxAttempts() - authSession.getFailedAttempts()
+                );
             }
 
             // Validate OTP
@@ -341,6 +346,22 @@ public class PhoneAuthenticationService {
             return ValidationResult.invalid("Region prefix is required", "REGION_REQUIRED");
         }
 
+        // Validate clientId - it must be provided and exist in the realm
+        if (request.getClientId() == null || request.getClientId().trim().isEmpty()) {
+            return ValidationResult.invalid("Client ID is required", "CLIENT_ID_REQUIRED");
+        }
+
+        ClientModel client = realm.getClientByClientId(request.getClientId());
+        if (client == null) {
+            log.warnf("Invalid client ID: %s", request.getClientId());
+            return ValidationResult.invalid("Invalid client ID", "INVALID_CLIENT_ID");
+        }
+
+        if (!client.isEnabled()) {
+            log.warnf("Client is disabled: %s", request.getClientId());
+            return ValidationResult.invalid("Client is disabled", "CLIENT_DISABLED");
+        }
+
         String fullPhoneNumber = request.getFullPhoneNumber();
         Optional<String> formattedPhoneOpt = smsService.format(fullPhoneNumber);
 
@@ -451,19 +472,20 @@ public class PhoneAuthenticationService {
 
     private TokenResult generateTokens(UserModel user, PhoneAuthSession authSession) {
         try {
-            // Get the client
+            // Get the client - clientId is now validated during request, so it should exist
             ClientModel client = null;
-            if (authSession.getClientId() != null) {
+            if (authSession.getClientId() != null && !authSession.getClientId().trim().isEmpty()) {
                 client = realm.getClientByClientId(authSession.getClientId());
             }
             
-            // If no client specified or not found, use the first available client
+            // If client not found (shouldn't happen if validation worked), fail explicitly
             if (client == null) {
-                client = realm.getClientsStream().findFirst().orElse(null);
+                log.errorf("Client not found for token generation: %s", authSession.getClientId());
+                return null;
             }
 
-            if (client == null) {
-                log.error("No client available for token generation");
+            if (!client.isEnabled()) {
+                log.errorf("Client is disabled: %s", authSession.getClientId());
                 return null;
             }
 

@@ -7,6 +7,7 @@ import org.keycloak.models.KeycloakSession;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Manages phone authentication sessions using Keycloak's distributed cache.
@@ -17,21 +18,54 @@ public class PhoneAuthSessionService {
 
     private static final String CACHE_NAME = "phoneAuthSessions";
     private static final String PHONE_SESSION_KEY_PREFIX = "phoneAuthSessionByPhone:";
+    private static final String RATE_LIMIT_KEY_PREFIX = "ratelimit:";
     private static final Duration DEFAULT_SESSION_TIMEOUT = Duration.ofMinutes(10);
     private static final Duration RATE_LIMIT_WINDOW = Duration.ofMinutes(1);
     private static final int MAX_REQUESTS_PER_WINDOW = 3;
 
     private final KeycloakSession session;
+    private final Object cache; // Using Object to avoid compile-time dependency on Infinispan
 
     public PhoneAuthSessionService(KeycloakSession session) {
         this.session = session;
+        // Try to get Infinispan cache provider for distributed storage using reflection
+        this.cache = getInfinispanCache();
+        if (cache == null) {
+            log.warn("Infinispan cache not available, using session attributes fallback (not distributed)");
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object getInfinispanCache() {
+        try {
+            // Use reflection to avoid compile-time dependency
+            Class<?> providerClass = Class.forName("org.keycloak.connections.infinispan.InfinispanConnectionProvider");
+            java.lang.reflect.Method getProviderMethod = session.getClass().getMethod("getProvider", Class.class);
+            Object provider = getProviderMethod.invoke(session, providerClass);
+            if (provider != null) {
+                java.lang.reflect.Method getCacheMethod = provider.getClass().getMethod("getCache", String.class);
+                return getCacheMethod.invoke(provider, CACHE_NAME);
+            }
+        } catch (Exception e) {
+            log.debugf("Could not access Infinispan cache: %s", e.getMessage());
+        }
+        return null;
     }
 
     /**
      * Creates a new phone authentication session
+     * Invalidates any existing session for the same phone number
      */
     public PhoneAuthSession createSession(String phoneNumber, String otpHash, String realmId, 
                                          String clientId, String ipAddress, String userAgent) {
+        // Invalidate any existing session for this phone number
+        PhoneAuthSession existingSession = getSessionByPhone(phoneNumber);
+        if (existingSession != null) {
+            log.debugf("Invalidating existing session %s for phone: %s", 
+                      existingSession.getSessionId(), phoneNumber);
+            removeSession(existingSession);
+        }
+
         String sessionId = UUID.randomUUID().toString();
         Instant now = Instant.now();
 
@@ -157,6 +191,7 @@ public class PhoneAuthSessionService {
 
     /**
      * Increments resend count
+     * Extends expiry by 10 minutes from current expiry time (not from now)
      */
     public boolean recordResend(PhoneAuthSession authSession, String newOtpHash) {
         if (!authSession.canResend()) {
@@ -167,26 +202,29 @@ public class PhoneAuthSessionService {
         authSession.incrementResendCount();
         authSession.setOtpHash(newOtpHash);
         
-        // Extend expiry time on resend
-        Instant now = Instant.now();
-        authSession.setExpiresAt(now.plus(DEFAULT_SESSION_TIMEOUT));
+        // Extend expiry time on resend: current expiry + 10 minutes (not now + 10)
+        Instant currentExpiry = authSession.getExpiresAt();
+        authSession.setExpiresAt(currentExpiry.plus(DEFAULT_SESSION_TIMEOUT));
         
         updateSession(authSession);
-        log.debugf("OTP resent for session: %s (count: %d)", 
-                  authSession.getSessionId(), authSession.getResendCount());
+        log.debugf("OTP resent for session: %s (count: %d), new expiry: %s", 
+                  authSession.getSessionId(), authSession.getResendCount(), 
+                  authSession.getExpiresAt());
         
         return true;
     }
 
     /**
      * Checks rate limiting for a phone number
+     * Uses cache TTL to automatically expire rate limit counters after RATE_LIMIT_WINDOW
      */
     public boolean isRateLimited(String phoneNumber, String realmId) {
-        String rateLimitKey = "ratelimit:" + realmId + ":" + phoneNumber;
+        String rateLimitKey = RATE_LIMIT_KEY_PREFIX + realmId + ":" + phoneNumber;
         Integer requestCount = getRateLimitCount(rateLimitKey);
 
         if (requestCount != null && requestCount >= MAX_REQUESTS_PER_WINDOW) {
-            log.warnf("Rate limit exceeded for phone: %s in realm: %s", phoneNumber, realmId);
+            log.warnf("Rate limit exceeded for phone: %s in realm: %s (count: %d)", 
+                     phoneNumber, realmId, requestCount);
             return true;
         }
 
@@ -226,57 +264,154 @@ public class PhoneAuthSessionService {
         MAX_ATTEMPTS_REACHED
     }
 
-    // Cache abstraction methods - these use Keycloak's internal cache
-    // In a real implementation, these would use Keycloak's Infinispan cache provider
+    // Cache abstraction methods - use Keycloak's Infinispan distributed cache
     
+    @SuppressWarnings("unchecked")
     private void putSession(String key, PhoneAuthSession authSession) {
-        // Store in Keycloak session attribute (temporary implementation)
-        // In production, use: session.getProvider(InfinispanConnectionProvider.class)
-        //                            .getCache(CACHE_NAME)
-        //                            .put(key, authSession, DEFAULT_SESSION_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-        this.session.setAttribute("phoneAuthSession:" + key, authSession);
+        String cacheKey = "phoneAuthSession:" + key;
+        long ttlMillis = Math.max(1, Duration.between(Instant.now(), authSession.getExpiresAt()).toMillis());
+        
+        if (cache != null) {
+            try {
+                // Use distributed cache with TTL via reflection
+                java.lang.reflect.Method putMethod = cache.getClass().getMethod("put", Object.class, Object.class, long.class, TimeUnit.class);
+                putMethod.invoke(cache, cacheKey, authSession, ttlMillis, TimeUnit.MILLISECONDS);
+                return;
+            } catch (Exception e) {
+                log.debugf("Failed to use Infinispan cache put: %s", e.getMessage());
+            }
+        }
+        // Fallback to session attributes (not distributed, but better than nothing)
+        log.warn("Using session attributes fallback - sessions won't persist across requests");
+        this.session.setAttribute(cacheKey, authSession);
     }
 
+    @SuppressWarnings("unchecked")
     private PhoneAuthSession getSessionFromCache(String key) {
-        // Retrieve from Keycloak session attribute (temporary implementation)
-        return (PhoneAuthSession) this.session.getAttribute("phoneAuthSession:" + key);
+        String cacheKey = "phoneAuthSession:" + key;
+        
+        if (cache != null) {
+            try {
+                java.lang.reflect.Method getMethod = cache.getClass().getMethod("get", Object.class);
+                Object value = getMethod.invoke(cache, cacheKey);
+                return value instanceof PhoneAuthSession ? (PhoneAuthSession) value : null;
+            } catch (Exception e) {
+                log.debugf("Failed to use Infinispan cache get: %s", e.getMessage());
+            }
+        }
+        // Fallback to session attributes
+        return (PhoneAuthSession) this.session.getAttribute(cacheKey);
     }
 
+    @SuppressWarnings("unchecked")
     private void removeSessionFromCache(String key) {
-        this.session.removeAttribute("phoneAuthSession:" + key);
+        String cacheKey = "phoneAuthSession:" + key;
+        
+        if (cache != null) {
+            try {
+                java.lang.reflect.Method removeMethod = cache.getClass().getMethod("remove", Object.class);
+                removeMethod.invoke(cache, cacheKey);
+                return;
+            } catch (Exception e) {
+                log.debugf("Failed to use Infinispan cache remove: %s", e.getMessage());
+            }
+        }
+        this.session.removeAttribute(cacheKey);
     }
 
+    @SuppressWarnings("unchecked")
     private void putSessionIdByPhone(String phoneNumber, String sessionId) {
         if (phoneNumber == null || phoneNumber.trim().isEmpty()) {
             return;
         }
 
-        this.session.setAttribute(PHONE_SESSION_KEY_PREFIX + phoneNumber, sessionId);
+        String cacheKey = PHONE_SESSION_KEY_PREFIX + phoneNumber;
+        long ttlMillis = DEFAULT_SESSION_TIMEOUT.toMillis();
+        
+        if (cache != null) {
+            try {
+                java.lang.reflect.Method putMethod = cache.getClass().getMethod("put", Object.class, Object.class, long.class, TimeUnit.class);
+                putMethod.invoke(cache, cacheKey, sessionId, ttlMillis, TimeUnit.MILLISECONDS);
+                return;
+            } catch (Exception e) {
+                log.debugf("Failed to use Infinispan cache put: %s", e.getMessage());
+            }
+        }
+        this.session.setAttribute(cacheKey, sessionId);
     }
 
+    @SuppressWarnings("unchecked")
     private String getSessionIdByPhone(String phoneNumber) {
         if (phoneNumber == null || phoneNumber.trim().isEmpty()) {
             return null;
         }
 
-        Object sessionId = this.session.getAttribute(PHONE_SESSION_KEY_PREFIX + phoneNumber);
+        String cacheKey = PHONE_SESSION_KEY_PREFIX + phoneNumber;
+        
+        if (cache != null) {
+            try {
+                java.lang.reflect.Method getMethod = cache.getClass().getMethod("get", Object.class);
+                Object value = getMethod.invoke(cache, cacheKey);
+                return value instanceof String ? (String) value : null;
+            } catch (Exception e) {
+                log.debugf("Failed to use Infinispan cache get: %s", e.getMessage());
+            }
+        }
+        Object sessionId = this.session.getAttribute(cacheKey);
         return sessionId instanceof String ? (String) sessionId : null;
     }
 
+    @SuppressWarnings("unchecked")
     private void removeSessionByPhone(String phoneNumber) {
         if (phoneNumber == null || phoneNumber.trim().isEmpty()) {
             return;
         }
 
-        this.session.removeAttribute(PHONE_SESSION_KEY_PREFIX + phoneNumber);
+        String cacheKey = PHONE_SESSION_KEY_PREFIX + phoneNumber;
+        
+        if (cache != null) {
+            try {
+                java.lang.reflect.Method removeMethod = cache.getClass().getMethod("remove", Object.class);
+                removeMethod.invoke(cache, cacheKey);
+                return;
+            } catch (Exception e) {
+                log.debugf("Failed to use Infinispan cache remove: %s", e.getMessage());
+            }
+        }
+        this.session.removeAttribute(cacheKey);
     }
 
+    @SuppressWarnings("unchecked")
     private Integer getRateLimitCount(String key) {
+        if (cache != null) {
+            try {
+                java.lang.reflect.Method getMethod = cache.getClass().getMethod("get", Object.class);
+                Object value = getMethod.invoke(cache, key);
+                return value instanceof Integer ? (Integer) value : null;
+            } catch (Exception e) {
+                log.debugf("Failed to use Infinispan cache get: %s", e.getMessage());
+            }
+        }
         return (Integer) this.session.getAttribute(key);
     }
 
+    @SuppressWarnings("unchecked")
     private void incrementRateLimitCount(String key) {
         Integer count = getRateLimitCount(key);
-        this.session.setAttribute(key, (count == null ? 0 : count) + 1);
+        int newCount = (count == null ? 0 : count) + 1;
+        long ttlMillis = RATE_LIMIT_WINDOW.toMillis();
+        
+        if (cache != null) {
+            try {
+                // Store with TTL - cache will auto-expire after RATE_LIMIT_WINDOW
+                java.lang.reflect.Method putMethod = cache.getClass().getMethod("put", Object.class, Object.class, long.class, TimeUnit.class);
+                putMethod.invoke(cache, key, newCount, ttlMillis, TimeUnit.MILLISECONDS);
+                return;
+            } catch (Exception e) {
+                log.debugf("Failed to use Infinispan cache put: %s", e.getMessage());
+            }
+        }
+        // Fallback: store without TTL (will persist until session ends)
+        this.session.setAttribute(key, newCount);
     }
 }

@@ -30,8 +30,21 @@ public class PhoneAuthRequest {
         if (phone == null || regionPrefix == null) {
             return null;
         }
-        // Remove leading zeros from phone number
-        String cleanPhone = phone.replaceFirst("^0+", "");
-        return regionPrefix + cleanPhone;
+
+        String trimmedPhone = phone.trim();
+        if (trimmedPhone.isEmpty()) {
+            return null;
+        }
+
+        // Keep only digits so prefix comparisons work reliably
+        String cleanedDigits = trimmedPhone.replaceAll("[^0-9]", "");
+        String withoutLeadingZeros = cleanedDigits.replaceFirst("^0+", "");
+
+        String regionDigits = regionPrefix.replaceAll("[^0-9]", "");
+        if (!regionDigits.isEmpty() && withoutLeadingZeros.startsWith(regionDigits)) {
+            withoutLeadingZeros = withoutLeadingZeros.substring(regionDigits.length());
+        }
+
+        return regionPrefix + withoutLeadingZeros;
     }
 }
